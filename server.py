@@ -1,4 +1,4 @@
-import json, os, pickle, time, logging
+import json, os, pickle, time, logging, re
 from pathlib import Path
 from typing import Optional
 
@@ -37,7 +37,7 @@ def download_index():
         log.info(f"Downloaded {name} ({len(r.content)//1024} KB)")
 
 def load_index():
-    global index, chunks_meta
+    global index, chunks_meta, chapter_index
     index = faiss.read_index("/data/faiss.index")
     with open("/data/chunks_meta.pkl", "rb") as f:
         chunks_meta = pickle.load(f)
@@ -66,6 +66,11 @@ class RAGQuery(BaseModel):
     query: str
     top_k: int = 5
 
+class ChapterQuery(BaseModel):
+    chapter: str
+    std: Optional[str] = None
+    subject: Optional[str] = None
+
 class SourceInfo(BaseModel):
     std: str
     subject: str
@@ -85,6 +90,26 @@ class RAGResponse(BaseModel):
     query: str
     results: list[RAGResult]
     total_results: int
+
+class ChapterChunk(BaseModel):
+    text: str
+    pages: list[int]
+    image_count: int
+
+class ChapterResult(BaseModel):
+    std: str
+    subject: str
+    textbook: str
+    chapter: str
+    chapter_number: str
+    total_chunks: int
+    chunks: list[ChapterChunk]
+
+class ChapterResponse(BaseModel):
+    object: str = "rag.chapter"
+    query: str
+    matches: list[ChapterResult]
+    total_matches: int
 
 class HealthResponse(BaseModel):
     status: str
@@ -121,6 +146,41 @@ def rag_query(req: RAGQuery) -> RAGResponse:
             image_count=len(m.get("images", [])),
         ))
     return RAGResponse(query=req.query, results=results, total_results=len(results))
+
+@app.post("/v1/rag/chapter")
+def get_chapter(req: ChapterQuery) -> ChapterResponse:
+    name_lower = req.chapter.strip().lower()
+    pattern = re.escape(name_lower)
+    matched_chunks = []
+    for m in chunks_meta:
+        ch_lower = m["ch"].strip().lower()
+        if not re.search(pattern, ch_lower):
+            continue
+        if req.std and m["std"] != req.std:
+            continue
+        if req.subject and m["subj"].lower() != req.subject.lower():
+            continue
+        matched_chunks.append(m)
+    if not matched_chunks:
+        raise HTTPException(404, f"No chapters matching '{req.chapter}'")
+    groups = {}
+    for m in matched_chunks:
+        key = (m["std"], m["subj"], m["book"], m["ch"], m["ch_num"])
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(m)
+    matches = []
+    for (std, subj, book, ch, ch_num), chunks in groups.items():
+        matches.append(ChapterResult(
+            std=std, subject=subj, textbook=book,
+            chapter=ch, chapter_number=ch_num,
+            total_chunks=len(chunks),
+            chunks=[ChapterChunk(
+                text=c["text"], pages=c.get("pages", []),
+                image_count=len(c.get("images", []))
+            ) for c in chunks],
+        ))
+    return ChapterResponse(query=req.chapter, matches=matches, total_matches=len(matches))
 
 @app.get("/v1/rag/chapters")
 def list_chapters():
