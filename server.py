@@ -1,4 +1,4 @@
-import json, os, pickle, time, logging, asyncio
+import json, os, pickle, time, logging
 from pathlib import Path
 from typing import Optional
 
@@ -7,7 +7,6 @@ import numpy as np
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from google import genai
 from pydantic import BaseModel
 
@@ -47,7 +46,7 @@ def load_index():
     norm_index = faiss.IndexFlatIP(EMBED_DIM)
     norm_index.add(vectors)
     index = norm_index
-    log.info(f"Loaded+normalized index: {index.ntotal} vectors, {len(chunks_meta)} chunks")
+    log.info(f"Loaded index: {index.ntotal} vectors, {len(chunks_meta)} chunks")
 
 if INDEX_URL:
     Path("/data").mkdir(exist_ok=True)
@@ -62,140 +61,83 @@ def get_embedding(texts: list[str]) -> list[list[float]]:
     )
     return [e.values for e in result.embeddings]
 
-def rag(query_text: str, top_k: int = 5) -> str:
-    q_emb = get_embedding([query_text])[0]
-    q_vec = np.array([q_emb], dtype=np.float32)
-    faiss.normalize_L2(q_vec)
-    scores, indices = index.search(q_vec, top_k)
-    parts = []
-    for score, idx in zip(scores[0], indices[0]):
-        m = chunks_meta[idx]
-        parts.append(
-            f"[Std {m['std']} | {m['subj']} | {m['book']} | "
-            f"Ch {m['ch_num']}: {m['ch']} | Pages {m['pages']} | "
-            f"Relevance: {score:.3f}]\n{m['text']}"
-        )
-    return "\n---\n".join(parts)
+# --- API Models ---
+class RAGQuery(BaseModel):
+    query: str
+    top_k: int = 5
 
-class ChatMessage(BaseModel):
-    role: str
-    content: str
+class SourceInfo(BaseModel):
+    std: str
+    subject: str
+    textbook: str
+    chapter: str
+    chapter_number: str
+    pages: list[int]
 
-class ChatRequest(BaseModel):
-    model: str = "ncert-rag"
-    messages: list[ChatMessage]
-    temperature: Optional[float] = 0.7
-    max_tokens: Optional[int] = 1024
-    stream: Optional[bool] = False
+class RAGResult(BaseModel):
+    text: str
+    source: SourceInfo
+    relevance_score: float
+    image_count: int
 
-class Usage(BaseModel):
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
+class RAGResponse(BaseModel):
+    object: str = "rag.query"
+    query: str
+    results: list[RAGResult]
+    total_results: int
 
-class Choice(BaseModel):
-    index: int = 0
-    message: ChatMessage
-    finish_reason: str = "stop"
+class HealthResponse(BaseModel):
+    status: str
+    vectors: int
+    chunks: int
 
-class ChatResponse(BaseModel):
-    id: str
-    object: str = "chat.completions"
-    created: int
-    model: str = "ncert-rag"
-    choices: list[Choice]
-    usage: Usage
-
-class ModelInfo(BaseModel):
-    id: str
-    object: str = "model"
-    created: int = 1710000000
-    owned_by: str = "ncert-rag"
-
-class ModelList(BaseModel):
-    object: str = "list"
-    data: list[ModelInfo]
-
-app = FastAPI(title="NCERT RAG API")
+app = FastAPI(title="NCERT RAG Tool")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-def count_tokens(text: str) -> int:
-    return max(1, len(text.encode("utf-8")) // 4)
-
 @app.get("/health")
-def health():
-    return {"status": "ok", "vectors": index.ntotal, "chunks": len(chunks_meta)}
+def health() -> HealthResponse:
+    return HealthResponse(status="ok", vectors=index.ntotal, chunks=len(chunks_meta))
 
-@app.get("/v1/models")
-def list_models():
-    return ModelList(data=[ModelInfo(id="ncert-rag")])
+@app.post("/v1/rag/query")
+def rag_query(req: RAGQuery) -> RAGResponse:
+    q_emb = get_embedding([req.query])[0]
+    q_vec = np.array([q_emb], dtype=np.float32)
+    faiss.normalize_L2(q_vec)
+    scores, indices = index.search(q_vec, req.top_k)
+    results = []
+    for score, idx in zip(scores[0], indices[0]):
+        m = chunks_meta[idx]
+        results.append(RAGResult(
+            text=m["text"],
+            source=SourceInfo(
+                std=m["std"],
+                subject=m["subj"],
+                textbook=m["book"],
+                chapter=m["ch"],
+                chapter_number=m["ch_num"],
+                pages=m.get("pages", []),
+            ),
+            relevance_score=round(float(score), 4),
+            image_count=len(m.get("images", [])),
+        ))
+    return RAGResponse(query=req.query, results=results, total_results=len(results))
 
-@app.post("/v1/chat/completions")
-async def chat_completion(req: ChatRequest):
-    system_prompt = ""
-    conversation = []
-    for m in req.messages:
-        if m.role == "system":
-            system_prompt = m.content
-        else:
-            conversation.append(f"{m.role}: {m.content}")
-
-    if not conversation:
-        raise HTTPException(400, "No messages found")
-
-    question = conversation[-1].replace("user: ", "", 1)
-    context = rag(question)
-
-    if not system_prompt:
-        system_prompt = (
-            "You are a friendly tutor for school children. "
-            "Answer based on NCERT textbook excerpts. "
-            "Be clear, engaging, and age-appropriate. "
-            "For each claim, cite which textbook and chapter it comes from."
-        )
-
-    history = "\n".join(conversation[:-1])
-    full_prompt = (
-        f"{system_prompt}\n\n"
-        f"Previous conversation:\n{history}\n\n"
-        f"Question: {question}\n\n"
-        f"Textbook excerpts:\n{context}"
-    )
-
-    p_tokens = count_tokens(full_prompt)
-
-    if req.stream:
-        async def stream_generator():
-            stream_resp = client.models.generate_content_stream(
-                model="gemini-3-flash-preview",
-                contents=full_prompt,
-            )
-            for chunk in stream_resp:
-                if chunk.text:
-                    sse = {
-                        "choices": [{"delta": {"content": chunk.text}, "index": 0}]
-                    }
-                    yield f"data: {json.dumps(sse)}\n\n"
-            yield "data: [DONE]\n\n"
-        return StreamingResponse(stream_generator(), media_type="text/event-stream")
-
-    response = client.models.generate_content(
-        model="gemini-3-flash-preview",
-        contents=full_prompt,
-    )
-    answer = response.text
-    c_tokens = count_tokens(answer)
-
-    return ChatResponse(
-        id=f"chatcmpl-{int(time.time())}",
-        created=int(time.time()),
-        choices=[Choice(message=ChatMessage(role="assistant", content=answer))],
-        usage=Usage(
-            prompt_tokens=p_tokens,
-            completion_tokens=c_tokens,
-            total_tokens=p_tokens + c_tokens,
-        ),
-    )
+@app.get("/v1/rag/chapters")
+def list_chapters():
+    seen = set()
+    chapters = []
+    for m in chunks_meta:
+        key = (m["std"], m["subj"], m["book"], m["ch"])
+        if key not in seen:
+            seen.add(key)
+            chapters.append({
+                "std": m["std"],
+                "subject": m["subj"],
+                "textbook": m["book"],
+                "chapter": m["ch"],
+                "chapter_number": m["ch_num"],
+            })
+    return {"object": "rag.chapters", "chapters": chapters, "total": len(chapters)}
 
 if __name__ == "__main__":
     import uvicorn
