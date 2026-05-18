@@ -25,6 +25,7 @@ chunks_meta: list = []
 prefix_class_map: dict = {}
 class_archives_lock = threading.Lock()
 downloading_classes = set()
+extraction_semaphore = threading.Semaphore(1)
 
 def download_file(name: str, url_base: str, dest: Path):
     url = f"{url_base}/{name}"
@@ -68,25 +69,30 @@ def get_class_archive_path(std: str) -> Path:
     return CLASS_ARCHIVES_DIR / f"class_{std}.tar.gz"
 
 def download_class_archive(std: str):
-    tar_path = get_class_archive_path(std)
-    extract_dir = get_class_extract_dir(std)
-    try:
-        CLASS_ARCHIVES_DIR.mkdir(parents=True, exist_ok=True)
-        download_file(f"class_{std}.tar.gz", IMAGES_URL, tar_path)
-        log.info(f"Extracting class {std} archive...")
-        extract_dir.mkdir(exist_ok=True)
-        with tarfile.open(str(tar_path), "r:gz") as tar:
-            tar.extractall(path=str(extract_dir))
-        tar_path.unlink()
-        count = len(list(extract_dir.iterdir()))
-        log.info(f"Class {std} images ready: {count} files in {extract_dir}")
-    except Exception as e:
-        log.warning(f"Failed to download/extract class {std} archive: {e}")
-        if tar_path.exists():
-            tar_path.unlink()
-    finally:
+    with extraction_semaphore:
         with class_archives_lock:
-            downloading_classes.discard(std)
+            if get_class_extract_dir(std).exists():
+                downloading_classes.discard(std)
+                return
+        tar_path = get_class_archive_path(std)
+        extract_dir = get_class_extract_dir(std)
+        try:
+            CLASS_ARCHIVES_DIR.mkdir(parents=True, exist_ok=True)
+            download_file(f"class_{std}.tar.gz", IMAGES_URL, tar_path)
+            log.info(f"Extracting class {std} archive...")
+            extract_dir.mkdir(exist_ok=True)
+            with tarfile.open(str(tar_path), "r:gz") as tar:
+                tar.extractall(path=str(extract_dir))
+            tar_path.unlink()
+            count = len(list(extract_dir.iterdir()))
+            log.info(f"Class {std} images ready: {count} files in {extract_dir}")
+        except Exception as e:
+            log.warning(f"Failed to download/extract class {std} archive: {e}")
+            if tar_path.exists():
+                tar_path.unlink()
+        finally:
+            with class_archives_lock:
+                downloading_classes.discard(std)
 
 def ensure_class_archive(std: str):
     extract_dir = get_class_extract_dir(std)
