@@ -17,7 +17,7 @@ EMBED_DIM = 384
 INDEX_URL = os.environ.get("INDEX_URL", "")
 
 log.info("Loading embedding model...")
-embed_model = TextEmbedding(model_name="all-MiniLM-L6-v2", providers=["CPUExecutionProvider"])
+embed_model = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2", providers=["CPUExecutionProvider"])
 log.info("Model loaded")
 
 index: faiss.Index = None
