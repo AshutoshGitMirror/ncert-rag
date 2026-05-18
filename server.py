@@ -7,17 +7,18 @@ import numpy as np
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from google import genai
 from pydantic import BaseModel
+from fastembed import TextEmbedding
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ncert-rag")
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-assert GEMINI_API_KEY, "GEMINI_API_KEY required"
-EMBED_DIM = 768
+EMBED_DIM = 384
 INDEX_URL = os.environ.get("INDEX_URL", "")
-client = genai.Client(api_key=GEMINI_API_KEY)
+
+log.info("Loading embedding model...")
+embed_model = TextEmbedding(model_name="all-MiniLM-L6-v2", providers=["CPUExecutionProvider"])
+log.info("Model loaded")
 
 index: faiss.Index = None
 chunks_meta: list = []
@@ -37,15 +38,10 @@ def download_index():
         log.info(f"Downloaded {name} ({len(r.content)//1024} KB)")
 
 def load_index():
-    global index, chunks_meta, chapter_index
+    global index, chunks_meta
     index = faiss.read_index("/data/faiss.index")
     with open("/data/chunks_meta.pkl", "rb") as f:
         chunks_meta = pickle.load(f)
-    vectors = index.reconstruct_n(0, index.ntotal)
-    faiss.normalize_L2(vectors)
-    norm_index = faiss.IndexFlatIP(EMBED_DIM)
-    norm_index.add(vectors)
-    index = norm_index
     log.info(f"Loaded index: {index.ntotal} vectors, {len(chunks_meta)} chunks")
 
 if INDEX_URL:
@@ -54,12 +50,8 @@ if INDEX_URL:
 load_index()
 
 def get_embedding(texts: list[str]) -> list[list[float]]:
-    result = client.models.embed_content(
-        model="gemini-embedding-2",
-        contents=[t[:2000] for t in texts],
-        config={"output_dimensionality": EMBED_DIM},
-    )
-    return [e.values for e in result.embeddings]
+    emb_gen = embed_model.embed([t[:2000] for t in texts])
+    return [list(e) for e in emb_gen]
 
 # --- API Models ---
 class RAGQuery(BaseModel):
@@ -127,7 +119,6 @@ def health() -> HealthResponse:
 def rag_query(req: RAGQuery) -> RAGResponse:
     q_emb = get_embedding([req.query])[0]
     q_vec = np.array([q_emb], dtype=np.float32)
-    faiss.normalize_L2(q_vec)
     scores, indices = index.search(q_vec, req.top_k)
     results = []
     for score, idx in zip(scores[0], indices[0]):

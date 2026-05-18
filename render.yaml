@@ -6,8 +6,6 @@ services:
     plan: free
     region: singapore
     envVars:
-      - key: GEMINI_API_KEY
-        sync: false
       - key: INDEX_URL
         value: https://github.com/AshutoshGitMirror/ncert-rag/releases/download/v1
       - key: PORT
