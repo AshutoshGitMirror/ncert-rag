@@ -200,7 +200,7 @@ curl https://ncert-rag-api.onrender.com/v1/rag/image/gegp108_p20_0.jpg -o diagra
 
 Returns `image/jpeg` binary content, or `404` if the image is not in the archive.
 
-> **Note**: Images are served from `images.tar.gz` (~1 GB) downloaded at cold start. On Render free tier, the archive is served directly without full extraction — individual files are read on demand.
+> **Note**: Images are served lazily — first request for a class triggers a background download + extract (~30-60s). Subsequent requests serve instantly from `/tmp` cache. Each class archive is 35-133 MB compressed, extracted to disk on Render's ephemeral storage.
 
 ### Error responses
 
