@@ -29,11 +29,15 @@ downloading_classes = set()
 def download_file(name: str, url_base: str, dest: Path):
     url = f"{url_base}/{name}"
     log.info(f"Downloading {url}...")
-    r = requests.get(url, timeout=300)
+    r = requests.get(url, timeout=300, stream=True)
     r.raise_for_status()
+    size = 0
     with open(dest, "wb") as f:
-        f.write(r.content)
-    log.info(f"Downloaded {name} ({len(r.content)//1024} KB)")
+        for chunk in r.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+                size += len(chunk)
+    log.info(f"Downloaded {name} ({size//1024} KB)")
 
 def download_index():
     for name in ["faiss.index", "chunks_meta.pkl"]:
