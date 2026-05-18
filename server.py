@@ -64,17 +64,8 @@ def load_index():
 def get_class_archive_path(std: str) -> Path:
     return CLASS_ARCHIVES_DIR / f"class_{std}.tar.gz"
 
-def ensure_class_archive(std: str):
+def download_class_archive(std: str):
     archive = get_class_archive_path(std)
-    if archive.exists():
-        return
-    with class_archives_lock:
-        if archive.exists():
-            return
-        if std in downloading_classes:
-            log.info(f"Class {std} archive already being downloaded by another request, waiting...")
-            return
-        downloading_classes.add(std)
     try:
         CLASS_ARCHIVES_DIR.mkdir(parents=True, exist_ok=True)
         download_file(f"class_{std}.tar.gz", IMAGES_URL, archive)
@@ -87,6 +78,19 @@ def ensure_class_archive(std: str):
         with class_archives_lock:
             downloading_classes.discard(std)
 
+def ensure_class_archive(std: str):
+    archive = get_class_archive_path(std)
+    if archive.exists():
+        return True
+    with class_archives_lock:
+        if archive.exists():
+            return True
+        if std in downloading_classes:
+            return False
+        downloading_classes.add(std)
+    threading.Thread(target=download_class_archive, args=(std,), daemon=True).start()
+    return False
+
 def serve_image_from_class_archive(filename: str) -> Optional[bytes]:
     prefix = filename.split("_")[0]
     std = prefix_class_map.get(prefix)
@@ -95,7 +99,10 @@ def serve_image_from_class_archive(filename: str) -> Optional[bytes]:
         return None
     archive = get_class_archive_path(std)
     if not archive.exists():
-        ensure_class_archive(std)
+        ready = ensure_class_archive(std)
+        if not ready:
+            log.info(f"Class {std} archive being downloaded, image {filename} not yet available")
+            return None
     if not archive.exists():
         return None
     try:
@@ -276,6 +283,15 @@ def list_chapters():
 @app.get("/v1/rag/image/{filename:path}")
 def get_image(filename: str):
     safe = Path(filename).name
+    prefix = safe.split("_")[0]
+    std = prefix_class_map.get(prefix)
+    if not std:
+        raise HTTPException(404, "Image not found")
+    archive = get_class_archive_path(std)
+    if not archive.exists():
+        ready = ensure_class_archive(std)
+        if not ready:
+            raise HTTPException(503, detail=f"Class {std} images loading, retry in 30s")
     data = serve_image_from_class_archive(safe)
     if data is None:
         raise HTTPException(404, "Image not found")
