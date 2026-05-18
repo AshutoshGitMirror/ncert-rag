@@ -1,4 +1,4 @@
-import json, os, pickle, time, logging, re, traceback, tarfile, io
+import json, os, pickle, time, logging, re, traceback, tarfile, io, threading
 from pathlib import Path
 from typing import Optional
 
@@ -18,12 +18,6 @@ EMBED_DIM = 384
 INDEX_URL = os.environ.get("INDEX_URL", "")
 IMAGES_URL = os.environ.get("IMAGES_URL", "")
 CACHE_DIR = Path("/tmp/ncert_rag")
-IMAGES_DIR = CACHE_DIR / "images"
-IMAGES_TAR = CACHE_DIR / "images.tar.gz"
-
-log.info("Loading embedding model...")
-embed_model = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2", providers=["CPUExecutionProvider"])
-log.info("Model loaded")
 
 index: faiss.Index = None
 chunks_meta: list = []
@@ -53,20 +47,24 @@ def load_index():
         chunks_meta = pickle.load(f)
     log.info(f"Loaded index: {index.ntotal} vectors, {len(chunks_meta)} chunks")
 
-def download_images():
+IMAGES_TAR = CACHE_DIR / "images.tar.gz"
+
+def download_images_background():
     global images_ready
     if not IMAGES_URL:
-        log.info("No IMAGES_URL set, skipping image download")
+        log.info("No IMAGES_URL set, images disabled")
         return
     if IMAGES_TAR.exists():
         log.info(f"Using cached images.tar.gz ({IMAGES_TAR.stat().st_size // 1024 // 1024} MB)")
         images_ready = True
         return
+    log.info("Starting background image archive download...")
     try:
         download_file("images.tar.gz", IMAGES_URL, IMAGES_TAR)
         images_ready = True
+        log.info("Image archive ready")
     except Exception as e:
-        log.warning(f"Failed to download images: {e}")
+        log.warning(f"Failed to download images archive: {e}")
 
 def serve_image_from_tar(filename: str) -> Optional[bytes]:
     if not IMAGES_TAR.exists():
@@ -81,11 +79,15 @@ def serve_image_from_tar(filename: str) -> Optional[bytes]:
         log.warning(f"Error reading {filename} from archive: {e}")
         return None
 
+log.info("Loading embedding model...")
+embed_model = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2", providers=["CPUExecutionProvider"])
+log.info("Model loaded")
+
 if INDEX_URL:
     CACHE_DIR.mkdir(exist_ok=True)
     download_index()
 load_index()
-download_images()
+threading.Thread(target=download_images_background, daemon=True).start()
 
 def get_embedding(texts: list[str]) -> list[list[float]]:
     emb_gen = embed_model.embed([t[:2000] for t in texts])
