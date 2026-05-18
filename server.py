@@ -61,29 +61,39 @@ def load_index():
     log.info(f"Loaded index: {index.ntotal} vectors, {len(chunks_meta)} chunks")
     log.info(f"Mapped {len(prefix_class_map)} image prefixes to classes")
 
+def get_class_extract_dir(std: str) -> Path:
+    return CLASS_ARCHIVES_DIR / std
+
 def get_class_archive_path(std: str) -> Path:
     return CLASS_ARCHIVES_DIR / f"class_{std}.tar.gz"
 
 def download_class_archive(std: str):
-    archive = get_class_archive_path(std)
+    tar_path = get_class_archive_path(std)
+    extract_dir = get_class_extract_dir(std)
     try:
         CLASS_ARCHIVES_DIR.mkdir(parents=True, exist_ok=True)
-        download_file(f"class_{std}.tar.gz", IMAGES_URL, archive)
-        log.info(f"Class {std} archive ready ({archive.stat().st_size // 1024 // 1024} MB)")
+        download_file(f"class_{std}.tar.gz", IMAGES_URL, tar_path)
+        log.info(f"Extracting class {std} archive...")
+        extract_dir.mkdir(exist_ok=True)
+        with tarfile.open(str(tar_path), "r:gz") as tar:
+            tar.extractall(path=str(extract_dir))
+        tar_path.unlink()
+        count = len(list(extract_dir.iterdir()))
+        log.info(f"Class {std} images ready: {count} files in {extract_dir}")
     except Exception as e:
-        log.warning(f"Failed to download class {std} archive: {e}")
-        if archive.exists():
-            archive.unlink()
+        log.warning(f"Failed to download/extract class {std} archive: {e}")
+        if tar_path.exists():
+            tar_path.unlink()
     finally:
         with class_archives_lock:
             downloading_classes.discard(std)
 
 def ensure_class_archive(std: str):
-    archive = get_class_archive_path(std)
-    if archive.exists():
+    extract_dir = get_class_extract_dir(std)
+    if extract_dir.exists():
         return True
     with class_archives_lock:
-        if archive.exists():
+        if extract_dir.exists():
             return True
         if std in downloading_classes:
             return False
@@ -97,22 +107,20 @@ def serve_image_from_class_archive(filename: str) -> Optional[bytes]:
     if not std:
         log.warning(f"No class mapping for prefix '{prefix}' in '{filename}'")
         return None
-    archive = get_class_archive_path(std)
-    if not archive.exists():
+    extract_dir = get_class_extract_dir(std)
+    if not extract_dir.exists():
         ready = ensure_class_archive(std)
         if not ready:
-            log.info(f"Class {std} archive being downloaded, image {filename} not yet available")
             return None
-    if not archive.exists():
+    if not extract_dir.exists():
+        return None
+    img_path = extract_dir / filename
+    if not img_path.exists():
         return None
     try:
-        with tarfile.open(str(archive), "r:gz") as tar:
-            member = tar.extractfile(filename)
-            if member:
-                return member.read()
-        return None
+        return img_path.read_bytes()
     except Exception as e:
-        log.warning(f"Error reading {filename} from class {std} archive: {e}")
+        log.warning(f"Error reading {filename}: {e}")
         return None
 
 log.info("Loading embedding model...")
@@ -200,7 +208,7 @@ def build_image_urls(images: list[str]) -> list[str]:
 
 @app.get("/health")
 def health() -> HealthResponse:
-    cached = sum(1 for p in CLASS_ARCHIVES_DIR.glob("class_*.tar.gz")) if CLASS_ARCHIVES_DIR.exists() else 0
+    cached = len([p for p in CLASS_ARCHIVES_DIR.iterdir() if p.is_dir()]) if CLASS_ARCHIVES_DIR.exists() else 0
     return HealthResponse(status="ok", vectors=index.ntotal, chunks=len(chunks_meta), images_available=cached)
 
 @app.post("/v1/rag/query")
@@ -287,14 +295,14 @@ def get_image(filename: str):
     std = prefix_class_map.get(prefix)
     if not std:
         raise HTTPException(404, "Image not found")
-    archive = get_class_archive_path(std)
-    if not archive.exists():
+    extract_dir = get_class_extract_dir(std)
+    if not extract_dir.exists():
         ready = ensure_class_archive(std)
         if not ready:
             raise HTTPException(503, detail=f"Class {std} images loading, retry in 30s")
     data = serve_image_from_class_archive(safe)
     if data is None:
-        raise HTTPException(404, "Image not found")
+        raise HTTPException(404, "Image not found in class {std}")
     return Response(content=data, media_type="image/jpeg")
 
 if __name__ == "__main__":
