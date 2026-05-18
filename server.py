@@ -16,12 +16,15 @@ log = logging.getLogger("ncert-rag")
 
 EMBED_DIM = 384
 INDEX_URL = os.environ.get("INDEX_URL", "")
-IMAGES_URL = os.environ.get("IMAGES_URL", "")
+IMAGES_URL = os.environ.get("IMAGES_URL", INDEX_URL)
 CACHE_DIR = Path("/tmp/ncert_rag")
+CLASS_ARCHIVES_DIR = CACHE_DIR / "archives"
 
 index: faiss.Index = None
 chunks_meta: list = []
-images_ready = False
+prefix_class_map: dict = {}
+class_archives_lock = threading.Lock()
+downloading_classes = set()
 
 def download_file(name: str, url_base: str, dest: Path):
     url = f"{url_base}/{name}"
@@ -41,42 +44,64 @@ def download_index():
         download_file(name, INDEX_URL, path)
 
 def load_index():
-    global index, chunks_meta
+    global index, chunks_meta, prefix_class_map
     index = faiss.read_index(str(CACHE_DIR / "faiss.index"))
     with open(CACHE_DIR / "chunks_meta.pkl", "rb") as f:
         chunks_meta = pickle.load(f)
+    for m in chunks_meta:
+        std = m["std"]
+        for img in m.get("images", []):
+            prefix = img.split("_")[0]
+            if prefix not in prefix_class_map:
+                prefix_class_map[prefix] = std
     log.info(f"Loaded index: {index.ntotal} vectors, {len(chunks_meta)} chunks")
+    log.info(f"Mapped {len(prefix_class_map)} image prefixes to classes")
 
-IMAGES_TAR = CACHE_DIR / "images.tar.gz"
+def get_class_archive_path(std: str) -> Path:
+    return CLASS_ARCHIVES_DIR / f"class_{std}.tar.gz"
 
-def download_images_background():
-    global images_ready
-    if not IMAGES_URL:
-        log.info("No IMAGES_URL set, images disabled")
+def ensure_class_archive(std: str):
+    archive = get_class_archive_path(std)
+    if archive.exists():
         return
-    if IMAGES_TAR.exists():
-        log.info(f"Using cached images.tar.gz ({IMAGES_TAR.stat().st_size // 1024 // 1024} MB)")
-        images_ready = True
-        return
-    log.info("Starting background image archive download...")
+    with class_archives_lock:
+        if archive.exists():
+            return
+        if std in downloading_classes:
+            log.info(f"Class {std} archive already being downloaded by another request, waiting...")
+            return
+        downloading_classes.add(std)
     try:
-        download_file("images.tar.gz", IMAGES_URL, IMAGES_TAR)
-        images_ready = True
-        log.info("Image archive ready")
+        CLASS_ARCHIVES_DIR.mkdir(parents=True, exist_ok=True)
+        download_file(f"class_{std}.tar.gz", IMAGES_URL, archive)
+        log.info(f"Class {std} archive ready ({archive.stat().st_size // 1024 // 1024} MB)")
     except Exception as e:
-        log.warning(f"Failed to download images archive: {e}")
+        log.warning(f"Failed to download class {std} archive: {e}")
+        if archive.exists():
+            archive.unlink()
+    finally:
+        with class_archives_lock:
+            downloading_classes.discard(std)
 
-def serve_image_from_tar(filename: str) -> Optional[bytes]:
-    if not IMAGES_TAR.exists():
+def serve_image_from_class_archive(filename: str) -> Optional[bytes]:
+    prefix = filename.split("_")[0]
+    std = prefix_class_map.get(prefix)
+    if not std:
+        log.warning(f"No class mapping for prefix '{prefix}' in '{filename}'")
+        return None
+    archive = get_class_archive_path(std)
+    if not archive.exists():
+        ensure_class_archive(std)
+    if not archive.exists():
         return None
     try:
-        with tarfile.open(str(IMAGES_TAR), "r:gz") as tar:
+        with tarfile.open(str(archive), "r:gz") as tar:
             member = tar.extractfile(filename)
             if member:
                 return member.read()
         return None
     except Exception as e:
-        log.warning(f"Error reading {filename} from archive: {e}")
+        log.warning(f"Error reading {filename} from class {std} archive: {e}")
         return None
 
 log.info("Loading embedding model...")
@@ -87,7 +112,6 @@ if INDEX_URL:
     CACHE_DIR.mkdir(exist_ok=True)
     download_index()
 load_index()
-threading.Thread(target=download_images_background, daemon=True).start()
 
 def get_embedding(texts: list[str]) -> list[list[float]]:
     emb_gen = embed_model.embed([t[:2000] for t in texts])
@@ -149,7 +173,7 @@ class HealthResponse(BaseModel):
     status: str
     vectors: int
     chunks: int
-    images_ready: bool = False
+    images_available: int = 0
 
 app = FastAPI(title="NCERT RAG Tool")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -161,13 +185,12 @@ async def global_exception_handler(request, exc):
     return JSONResponse(status_code=500, content={"detail": str(exc), "type": type(exc).__name__})
 
 def build_image_urls(images: list[str]) -> list[str]:
-    if not images_ready:
-        return []
     return [f"/v1/rag/image/{img.replace('.png', '.jpg')}" for img in images]
 
 @app.get("/health")
 def health() -> HealthResponse:
-    return HealthResponse(status="ok", vectors=index.ntotal, chunks=len(chunks_meta), images_ready=images_ready)
+    cached = sum(1 for p in CLASS_ARCHIVES_DIR.glob("class_*.tar.gz")) if CLASS_ARCHIVES_DIR.exists() else 0
+    return HealthResponse(status="ok", vectors=index.ntotal, chunks=len(chunks_meta), images_available=cached)
 
 @app.post("/v1/rag/query")
 def rag_query(req: RAGQuery) -> RAGResponse:
@@ -249,7 +272,7 @@ def list_chapters():
 @app.get("/v1/rag/image/{filename:path}")
 def get_image(filename: str):
     safe = Path(filename).name
-    data = serve_image_from_tar(safe)
+    data = serve_image_from_class_archive(safe)
     if data is None:
         raise HTTPException(404, "Image not found")
     return Response(content=data, media_type="image/jpeg")
