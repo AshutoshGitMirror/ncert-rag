@@ -137,7 +137,7 @@ def rag_query(req: RAGQuery) -> RAGResponse:
                 subject=m["subj"],
                 textbook=m["book"],
                 chapter=m["ch"],
-                chapter_number=m["ch_num"],
+                chapter_number=str(m["ch_num"]),
                 pages=m.get("pages", []),
             ),
             relevance_score=round(float(score), 4),
@@ -171,7 +171,7 @@ def get_chapter(req: ChapterQuery) -> ChapterResponse:
     for (std, subj, book, ch, ch_num), chunks in groups.items():
         matches.append(ChapterResult(
             std=std, subject=subj, textbook=book,
-            chapter=ch, chapter_number=ch_num,
+            chapter=ch, chapter_number=str(ch_num),
             total_chunks=len(chunks),
             chunks=[ChapterChunk(
                 text=c["text"], pages=c.get("pages", []),
