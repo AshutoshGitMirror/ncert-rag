@@ -8,7 +8,7 @@ import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from fastembed import TextEmbedding
 
 logging.basicConfig(level=logging.INFO)
@@ -147,10 +147,31 @@ class RAGQuery(BaseModel):
     query: str
     top_k: int = 5
 
+    @field_validator("query")
+    @classmethod
+    def query_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("query must not be empty")
+        return v
+
+    @field_validator("top_k")
+    @classmethod
+    def top_k_positive(cls, v):
+        if v < 1:
+            raise ValueError("top_k must be >= 1")
+        return v
+
 class ChapterQuery(BaseModel):
     chapter: str
     std: Optional[str] = None
     subject: Optional[str] = None
+
+    @field_validator("chapter")
+    @classmethod
+    def chapter_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("chapter must not be empty")
+        return v
 
 class SourceInfo(BaseModel):
     std: str
