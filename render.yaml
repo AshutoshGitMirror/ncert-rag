@@ -10,8 +10,4 @@ services:
         value: https://github.com/AshutoshGitMirror/ncert-rag/releases/download/v1
       - key: PORT
         value: "8000"
-    disk:
-      name: data
-      mountPath: /data
-      sizeGB: 1
     healthCheckPath: /health

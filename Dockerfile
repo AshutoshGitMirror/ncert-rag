@@ -8,7 +8,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY server.py .
 
 # Volume for cached index files
-VOLUME /data
 
 EXPOSE 8000
 

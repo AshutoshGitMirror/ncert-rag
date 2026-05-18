@@ -25,7 +25,7 @@ chunks_meta: list = []
 
 def download_index():
     for name in ["faiss.index", "chunks_meta.pkl"]:
-        path = Path(f"/data/{name}")
+        path = Path(f"/tmp/ncert_rag/{name}")
         if path.exists():
             log.info(f"Using cached {name}")
             continue
@@ -39,13 +39,13 @@ def download_index():
 
 def load_index():
     global index, chunks_meta
-    index = faiss.read_index("/data/faiss.index")
-    with open("/data/chunks_meta.pkl", "rb") as f:
+    index = faiss.read_index("/tmp/ncert_rag/faiss.index")
+    with open("/tmp/ncert_rag/chunks_meta.pkl", "rb") as f:
         chunks_meta = pickle.load(f)
     log.info(f"Loaded index: {index.ntotal} vectors, {len(chunks_meta)} chunks")
 
 if INDEX_URL:
-    Path("/data").mkdir(exist_ok=True)
+    Path("/tmp/ncert_rag").mkdir(exist_ok=True)
     download_index()
 load_index()
 
