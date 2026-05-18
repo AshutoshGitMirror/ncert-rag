@@ -8,6 +8,8 @@ services:
     envVars:
       - key: INDEX_URL
         value: https://github.com/AshutoshGitMirror/ncert-rag/releases/download/v1
+      - key: IMAGES_URL
+        value: https://github.com/AshutoshGitMirror/ncert-rag/releases/download/v1
       - key: PORT
         value: "8000"
     healthCheckPath: /health

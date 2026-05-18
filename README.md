@@ -22,7 +22,8 @@ Semantic search over all NCERT textbooks (Classes 1–12, all subjects). 19,678 
 
 - **Embedding**: `sentence-transformers/all-MiniLM-L6-v2` (384-dim) via fastembed ONNX runtime.
 - **Index**: FAISS `IndexFlatIP` (inner product = cosine similarity on normalized vectors).
-- **Cold start**: Downloads `faiss.index` (28.8 MB) + `chunks_meta.pkl` (34.8 MB) from GitHub Releases on first request, caches in `/tmp/ncert_rag`.
+- **Cold start**: Downloads `faiss.index` (28.8 MB) + `chunks_meta.pkl` (34.8 MB) + `images.tar.gz` (1018 MB) from GitHub Releases, caches in `/tmp/ncert_rag`.
+- **Images**: 79,617 textbook diagrams/photos compressed as JPEG, served on demand from archive.
 - **No API keys**: All embedding is local.
 
 ## API Endpoints
@@ -32,7 +33,7 @@ Semantic search over all NCERT textbooks (Classes 1–12, all subjects). 19,678 
 Server status and index stats.
 
 ```json
-{"status":"ok","vectors":19678,"chunks":19678}
+{"status":"ok","vectors":19678,"chunks":19678,"images_ready":true}
 ```
 
 ### `GET /v1/rag/chapters`
@@ -91,7 +92,11 @@ Semantic search over all textbook chunks. Returns the most relevant passages for
         "pages": [21]
       },
       "relevance_score": 0.7623,
-      "image_count": 3
+      "image_count": 3,
+      "image_urls": [
+        "/v1/rag/image/gegp108_p20_0.jpg",
+        "/v1/rag/image/gegp108_p20_1.jpg"
+      ]
     }
   ]
 }
@@ -109,6 +114,7 @@ Semantic search over all textbook chunks. Returns the most relevant passages for
 | `source.pages` | list[int] | Page numbers in source PDF |
 | `relevance_score` | float | Cosine similarity (0–1) |
 | `image_count` | int | Images embedded in this chunk |
+| `image_urls` | list[str] | Relative URLs to serve images for this chunk |
 
 ### `POST /v1/rag/chapter`
 
@@ -143,7 +149,10 @@ Retrieve all chunk content for a chapter by name. Supports optional filters by `
         {
           "text": "CHAPTER TEN\nTHERMAL PROPERTIES OF MATTER\n10.1 INTRODUCTION...",
           "pages": [1],
-          "image_count": 8
+          "image_count": 8,
+          "image_urls": [
+            "/v1/rag/image/gegp108_p20_0.jpg"
+          ]
         }
       ]
     }
@@ -163,6 +172,7 @@ Retrieve all chunk content for a chapter by name. Supports optional filters by `
 | `matches[].chunks[].text` | string | Chunk text content |
 | `matches[].chunks[].pages` | list[int] | Page numbers |
 | `matches[].chunks[].image_count` | int | Images in this chunk |
+| `matches[].chunks[].image_urls` | list[str] | Relative URLs to serve images for this chunk |
 
 **Filtering examples**
 
@@ -172,6 +182,25 @@ Retrieve all chunk content for a chapter by name. Supports optional filters by `
 | `{"chapter": "matter", "std": "11"}` | Only class 11 chapters matching "matter" |
 | `{"chapter": "matter", "subject": "Physics"}` | Only Physics chapters matching "matter" |
 | `{"chapter": "matter", "std": "11", "subject": "Physics"}` | Class 11 Physics chapters matching "matter" |
+
+### `GET /v1/rag/image/{filename}`
+
+Serve a textbook image by filename. Images are extracted from PDFs, converted to JPEG, and served from a compressed archive.
+
+**Example**
+
+```bash
+# Fetch a specific image from a query result
+curl https://ncert-rag-api.onrender.com/v1/rag/image/gegp108_p20_0.jpg -o diagram.jpg
+```
+
+| Field | Description |
+|-------|-------------|
+| `filename` | Image filename from `image_urls` list in query/chapter responses |
+
+Returns `image/jpeg` binary content, or `404` if the image is not in the archive.
+
+> **Note**: Images are served from `images.tar.gz` (~1 GB) downloaded at cold start. On Render free tier, the archive is served directly without full extraction — individual files are read on demand.
 
 ### Error responses
 
@@ -224,6 +253,10 @@ for r in data["results"]:
     s = r["source"]
     print(f"[{s['std']} {s['subject']} ch{s['chapter_number']}] "
           f"{s['chapter']} | score: {r['relevance_score']}")
+    # Fetch images
+    for img_url in r["image_urls"]:
+        img_data = requests.get(f"{BASE}{img_url}").content
+        # save or process img_data
 
 # Chapter lookup
 resp = requests.post(f"{BASE}/v1/rag/chapter", json={
@@ -234,6 +267,10 @@ resp = requests.post(f"{BASE}/v1/rag/chapter", json={
 data = resp.json()
 for m in data["matches"]:
     print(f"{m['chapter']}: {m['total_chunks']} chunks")
+    # First chunk's images
+    for chunk in m["chunks"][:1]:
+        for img_url in chunk["image_urls"]:
+            print(f"  Image: {img_url}")
 ```
 
 ## Deployment
@@ -253,6 +290,8 @@ services:
     envVars:
       - key: INDEX_URL
         value: https://github.com/AshutoshGitMirror/ncert-rag/releases/download/v1
+      - key: IMAGES_URL
+        value: https://github.com/AshutoshGitMirror/ncert-rag/releases/download/v1
       - key: PORT
         value: "8000"
     healthCheckPath: /health
@@ -271,7 +310,8 @@ curl -X POST https://api.render.com/v1/services/<SERVICE_ID>/deploys \
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `INDEX_URL` | Yes | Base URL for `faiss.index` and `chunks_meta.pkl` |
+| `INDEX_URL` | Yes | Base URL for `faiss.index`, `chunks_meta.pkl`, `images.tar.gz` |
+| `IMAGES_URL` | No | Base URL for `images.tar.gz` (falls back to `INDEX_URL`) |
 | `PORT` | No | Server port (default 8000) |
 
 ## Dataset
